@@ -1,0 +1,137 @@
+Пул подключений PoolConnection
+В общем случае пул объектов - это контейнер объектов, из которого можно получить один из них на время. Использование пула объектов есть шаблонный способ решения проблемы хранения и раздачи объектов во временное пользование.
+
+Для разработки приложения можно использовать пулы различного типа объектов, например пул потоков Thread Pool. В данной статье рассматривается только пул подключений Connection Pool к БД.
+
+Пул подключений необходим для WEB приложения, когда все запросы к базе данных стекаются в одно место к серверу, а создание нового подключения к БД требует значительных ресурсоов. Использование пула подключения оправдано более экономной стратегией - создание несколько подключений и слежение за их состояниям; по мере необходимости добавлять новые.
+
+Существует несколько реализаций пулов подключений к БД. Можно, конечно, сделать и свою имплементацию. Опасность данной затеи заключается в том, что если сделать не очень аккуратно, то пул может "протекать" или объекты будут "тухнуть". Для серверной части приложения это особо неприятно - необходимо контролировать объём пула и состояние объектов.
+
+На сегодняшний день существуют готовые решения. Самое главное научиться их правильно настраивать.
+
+Пул подключений - apache commons dbcp, datasource
+Популярный контейнер сервлетов Apache Tomcat предоставляет собственное решение для создания dbcp, основанное на библиотеке apache-commons-dbcp.
+
+apache dbcp предполагает, что имеется некоторый набор («пул») соединений к базе данных. Когда новый пользователь запрашивает доступ к БД, ему выдаётся уже открытое соединение из этого пула. Если все открытые соединения уже заняты, создаётся новое. Как только пользователь освобождает одно из уже существующих соединений, оно становится доступно для других пользователей. Если соединение долго не используется, оно закрывается.
+
+Чтобы реализовать поддержку пула подключений нужно пройти несколько этапов.
+
+На первом этапе необходимо объявить ресурс (базу данных) в контексте приложения. Ресурс описывается следующим кодом (пример для MySQL) :
+
+<resource name="jdbc/appname" 
+   auth="Container"
+   description="DB Connection" 
+   username="username"
+   password="password"
+   type="javax.sql.DataSource" 
+   maxActive="100"
+   maxIdle="30" 
+   maxWait="10000"
+   driverClassName="com.mysql.jdbc.Driver"
+   url="jdbc:mysql://localhost:3306/databasename?useUnicode=yes&characterEncoding=UTF-8"/>
+</resource>
+Контекст приложения представляет файл XML. Желательно хранить его в %document_root%/META-INF/context.xml, однако это не единственный вариант. Про контекст можно почитать на официальном сайте Tomcat'a: The Context Container.
+
+Далее следует добавить ссылку на этот ресурс в дескрипторе приложения web.xml :
+
+<resource-ref>
+    DB Connection
+    <res-ref-name>jdbc/appname</res-ref-name>
+    <res-type>javax.sql.DataSource</res-type>
+    <res-auth>Container</res-auth>
+</resource-ref>
+После этого можно использовать пул подключений (connection pool java) в приложении. Для этого следует получить объект Connection в следующем коде :
+
+InitialContext initContext= new InitialContext();
+DataSource ds = (DataSource) initContext.lookup("java:comp/env/jdbc/appname");
+Connection connection = ds.getConnection();
+Для получения источника данных (DataSource) используется механизм JNDI (подробнее про него можно почитать здесь)
+
+Описание пула подключений завершено, подключение в приложение получено, и теперь можно приступить к реализации логики работы с БД - connection.createStatement(). После выполнения запроса следует закрыть соединение (connection.close()). Однако в отличии от обычного соединения через драйвер JDBC, это соединение на самом деле не закроется: оно будет помечено в пуле как свободное, и его можно будет переиспользовать позже.
+
+Перед возвратом соединения в пул все Statement и ResultSet, полученные с помощью этого соединения, автоматически закрываются в соответствии с API.
+
+Connection Pool C3P0
+Пул подключений C3P0 представлен файлом c3p0-0.9.1.2.jar (версия может отличаться). Аббревиатура расшифровывается следующим образом : Connection Pool 3.0 => СP30 => C3P0.
+
+Принцип настройки JNDI ресурсов уже представлен выше. Необходимо определить глобальные ресурсы, а в WEB приложении указать ссылку, либо можно указать непосредственно в context.xml. Все зависит от того, где хранятся библиотеки и какая конфигурация сервера.
+
+Пример настройки C3P0 с БД MySQL :
+<resource auth="Container" 
+    description="DB Connection" 
+    driverClass="com.mysql.jdbc.Driver" 
+    user="username" 
+    password="password"
+    jdbcUrl="jdbc:mysql://localhost:3306/databasename?useUnicode=yes&characterEncoding=UTF-8" 
+    factory="org.apache.naming.factory.BeanFactory" 
+    type="com.mchange.v2.c3p0.ComboPooledDataSource" 
+    name="jdbc/db" 
+    maxPoolSize="50" 
+    minPoolSize="0" 
+    maxConnectionAge="100"
+    acquireRetryAttempts="60"
+    acquireIncrement="1" 
+    preferredTestQuery="SELECT 1"
+    testConnectionOnCheckout="true">
+</resource>
+Теперь установить пул подключений не требует особого ума. Основная задача заключается в настройке его работы, чтобы он стабильно функционировал и выдерживал нагрузку. Дополнительно о значении каждого параметры можно прочитать в документации :
+
+maxPoolSize и minPoolSize - возможные максимальное и минимальное количество подключений в пуле
+preferredTestQuery - запрос который проверяет подключение к БД. Зависит от конкретной СУБД.
+acquireRetryAttempts - количество попыток подключения к СУБД, если она не доступна. Ставим 0, если хотим, чтобы попытки не заканчивались.
+testConnectionOnCheckout - "прожорлив", если можно, то лучше не использовать
+Может оказаться, что jdbc Url включает символ амперсанда '&'. Если настройка осуществляется через XML-файл, то надо вместо param1=value1&param2=value2 использовать param1=value1&amp;param2=value2.
+
+Задача создания пула подключений к Oracle не тривиальна. Документация приведена здесь
+
+Пул подключений на уровне java приложения, ComboPooledDataSource
+Пул подключений C3P0 можно подключать не только на уровне контейнера приложений Tomcat, но и на уровне самого приложения. Для этого не требуется создавать никаких дополнительных внешних XML файлов, о которых было сказано выше.
+
+Следующий код демонстрирует процесс создания и инициализации пула подключений :
+
+import java.beans.PropertyVetoException;
+import com.mchange.v2.c3p0.ComboPooledDataSource;
+...
+ComboPooledDataSource cpds = new ComboPooledDataSource(); 
+try {
+    cpds.setDriverClass("com.mysql.jdbc.Driver"             );
+    cpds.setJdbcUrl    ("jdbc:mysql://localhost:3306/dbName"); 
+    cpds.setUser       ("dbLogin"   );                                   
+    cpds.setPassword   ("dbPassword");
+
+    Properties properties = new Properties();
+    properties.setProperty ("user"             , "dbLogin"   );
+    properties.setProperty ("password"         , "dbPassword");
+    properties.setProperty ("useUnicode"       , "true"      );
+    properties.setProperty ("characterEncoding", "UTF8"      );
+    cpds.setProperties(properties);
+	
+    // set options
+    cpds.setMaxStatements             (180);
+    cpds.setMaxStatementsPerConnection(180);
+    cpds.setMinPoolSize               ( 50);
+    cpds.setAcquireIncrement          ( 10);
+    cpds.setMaxPoolSize               ( 60);
+    cpds.setMaxIdleTime               ( 30);
+} catch (PropertyVetoException e) {
+    e.printStackTrace();
+}
+Следующий код демонстрирует как получить Connection из пула, и как его закрыть (вернуть в пул):
+
+// Получить подключение из пула
+try {
+    Connection connection = cpds.getConnection();
+    System.out.println ("closeConnection : idleConnections = " + cpds.getNumIdleConnections() + 
+                                        ", busyConnections = " + cpds.getNumBusyConnections());
+} catch (SQLException e) {
+    e.printStackTrace();
+}
+
+// "Вернуть" (закрыть) подключение
+try {
+    connection.close();
+    System.out.println ("closeConnection : idleConnections = " + cpds.getNumIdleConnections() + 
+                                        ", busyConnections = " + cpds.getNumBusyConnections());
+} catch (SQLException e) {
+    e.printStackTrace();
+}
